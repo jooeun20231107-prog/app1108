@@ -30,7 +30,7 @@ st.set_page_config(page_title="하루 한 질문", page_icon="💌", layout="cen
 # ═════════════════════════ 저장소 (GitHub / 로컬) ═════════════════════════
 DATA_PATH = "data/family.json"
 LOCAL_ROOT = Path("local_data")
-EMPTY = {"members": {}, "entries": {}, "settings": {}, "events": {}, "moods": {}}
+EMPTY = {"members": {}, "entries": {}, "settings": {}, "events": {}, "moods": {}, "signals": []}
 
 
 def _norm(d):
@@ -39,6 +39,7 @@ def _norm(d):
     d.setdefault("settings", {})
     d.setdefault("events", {})
     d.setdefault("moods", {})
+    d.setdefault("signals", [])
     return d
 
 
@@ -264,6 +265,14 @@ def question_for(day: date, members: dict | None = None) -> dict:
 # ═════════════════════════ 앱 ═════════════════════════
 KST = timezone(timedelta(hours=9))
 EMOJIS = ["❤️", "😂", "🥹", "👏", "🤗"]
+SIGNALS = {
+    "talk": ("🗣️", "얘기하고 싶어요"), "pickup": ("🚗", "데리러 와주세요"), "hungry": ("🍚", "밥 먹고 싶어요"),
+    "favor": ("🙏", "부탁이 있어요"), "alone": ("🤫", "오늘은 혼자 있고 싶어요"), "help": ("🆘", "도와주세요"),
+    "sorry": ("😢", "미안해요"), "thanks": ("💗", "고마워요"), "hug": ("🤗", "안아주세요"),
+}
+SIG_REPLIES = ["👍 알겠어요", "🏃 지금 갈게요", "🕒 나중에 얘기해요", "💗 사랑해요", "🫶 기다릴게요"]
+TILES = [("today", "💬", "오늘의 질문"), ("signal", "💌", "마음 신호"), ("calendar", "📅", "가족 캘린더"),
+         ("book", "📖", "이야기책"), ("family", "🏠", "우리 가족"), ("settings", "⚙️", "내 설정")]
 MOODS = [("😊", "좋아요"), ("😐", "그냥 그래요"), ("😢", "속상해요"), ("😡", "화나요"), ("😴", "피곤해요")]
 KINDS = {"가족": ("🏠", "#E8743B"), "약속": ("🤝", "#4C9F70"), "학교": ("🏫", "#4A7FD0"),
          "병원": ("🏥", "#C0507A"), "기념일": ("🎉", "#B8860B"), "기타": ("📌", "#7A6A5A")}
@@ -544,6 +553,12 @@ button[kind="primary"] * {{ color:#fff !important; }}
 .mrow .d {{ margin-left:auto; font-weight:800; color:#E8743B; }}
 .past {{ background:#FFF3DF; border-radius:18px; padding:14px 18px; margin:10px 0; }}
 .stButton>button, .stDownloadButton>button {{ border-radius:16px; min-height:3rem; font-weight:700; font-size:1em; }}
+.st-key-tiles button {{ min-height:5.8rem; font-size:1.1em; border-radius:22px; background:#fff; border:2px solid #F4D9B8; box-shadow:0 3px 12px rgba(120,80,40,.08); }}
+.st-key-tiles button:hover {{ border-color:#E8743B; }}
+.st-key-tiles button[kind="primary"] {{ background:#E8743B; border-color:#E8743B; color:#fff; }}
+.sig {{ background:#fff; border:1.5px solid #F4D9B8; border-radius:18px; padding:12px 16px; margin:10px 0 4px; }}
+.sig.new {{ border:2.5px solid #E8743B; background:#FFF3E6; }}
+.sig .k {{ font-weight:800; font-size:1.05em; }} .sig .s {{ color:#9a7b64; font-size:.78em; margin-top:4px; }}
 .stTextArea textarea {{ font-size:1.05em; border-radius:14px; }}
 .stTabs [data-baseweb="tab"] {{ font-weight:700; font-size:1em; padding:10px 12px; }}
 </style>""",
@@ -796,6 +811,15 @@ def tab_today(data, me):
             storage.load.clear()
             st.rerun()
 
+    # 어제 놓친 질문 (패널티 없이 이어서 답하기)
+    yday = day - timedelta(days=1)
+    joined = data["members"][me].get("joined", "")
+    if joined and joined <= yday.isoformat() and me not in valid_answers(data, data["entries"].get(yday.isoformat(), {})):
+        with st.expander("😢 어제 질문을 놓쳤어요 — 지금 이어서 답해도 괜찮아요"):
+            qy = get_question(data, yday)
+            st.markdown(f"**{qy['text']}**")
+            answer_form(data, me, yday, qy)
+
     # 1년 전 오늘
     for yrs in range(1, 6):
         try:
@@ -853,6 +877,10 @@ def tab_calendar(data, me):
             bdays.setdefault((b.month, b.day), []).append(m["name"])
         except Exception:
             pass
+    mkey = f"{y:04d}-{mth:02d}"
+    mevs = [ev for ev in data["events"].values() if ev["date"].startswith(mkey)]
+    mdone = sum(1 for ev in mevs if ev.get("done"))
+    st.markdown(f"<div class='chips'><span class='chip'>✅ {mth}월 완료 {mdone}/{len(mevs)}개</span></div>", unsafe_allow_html=True)
     rows = "<tr>" + "".join(f"<th>{w}</th>" for w in "일월화수목금토") + "</tr>"
     for week in pycal.Calendar(firstweekday=6).monthdayscalendar(y, mth):
         rows += "<tr>"
@@ -886,10 +914,18 @@ def tab_calendar(data, me):
         note = f"<div class='s'>{esc(ev['note'])}</div>" if ev.get("note") else ""
         rs = ev.get("rsvp", {})
         rtxt = "  ".join(f"{RSVP[v].split()[0]} {label(data, mid, me)}" for mid, v in rs.items() if mid in data["members"])
-        st.markdown(f"<div class='evcard' style='--c:{col}'><div class='t'>{ico} {esc(ev['title'])}</div>"
+        st.markdown(f"<div class='evcard' style='--c:{col};opacity:{0.55 if ev.get('done') else 1}'><div class='t'>{'✅ ' if ev.get('done') else ''}{ico} {esc(ev['title'])}</div>"
                     f"<div class='s'>{esc(label(data, ev.get('by'), me))} 등록{tm}</div>{note}</div>", unsafe_allow_html=True)
         if rtxt:
             st.caption(rtxt)
+        dn = ev.get("done")
+        if st.button("↩ 완료 취소" if dn else "✅ 완료했어요", key=f"done_{eid}", use_container_width=True,
+                     type="secondary" if dn else "primary"):
+            def mdn(d, eid=eid, v=not dn):
+                d["events"][eid]["done"] = v
+                d["events"][eid]["done_by"] = me if v else ""
+            storage.update(mdn)
+            st.rerun()
         mine = ev.get("by") == me
         cols = st.columns(len(RSVP) + (1 if mine else 0))
         for c, (key, lb) in zip(cols, RSVP.items()):
@@ -905,27 +941,51 @@ def tab_calendar(data, me):
             storage.update(md)
             st.rerun()
 
-    with st.expander("➕ 일정 추가", expanded=not data["events"]):
-        title = st.text_input("무슨 일정이에요?", max_chars=30, key="ev_title", placeholder="예) 가족 저녁식사, 기말고사, 치과")
-        d1, d2 = st.columns(2)
-        edate = d1.date_input("날짜", value=sel, format="YYYY/MM/DD", key="ev_date")
-        kind = d2.selectbox("종류", list(KINDS), format_func=lambda x: f"{KINDS[x][0]} {x}", key="ev_kind")
-        use_t = st.checkbox("시간 정하기", key="ev_ut")
-        etime = st.time_input("시간", value=datetime.strptime("18:00", "%H:%M").time(), key="ev_time") if use_t else None
-        note = st.text_input("메모 (선택)", max_chars=60, key="ev_note")
-        if st.button("일정 등록", type="primary", use_container_width=True, key="ev_save"):
-            if not title.strip():
-                st.warning("일정 이름을 적어주세요.")
-            else:
-                eid = uuid.uuid4().hex[:8]
+    st.markdown("#### ⚡ 빠른 일정 추가")
+    st.caption("이름만 적고 날짜 버튼 한 번이면 끝!")
 
-                def ma(d):
-                    d["events"][eid] = {"title": title.strip(), "date": edate.isoformat(), "kind": kind,
-                                        "time": etime.strftime("%H:%M") if etime else "", "note": note.strip(),
-                                        "by": me, "rsvp": {me: "yes"}}
-                storage.update(ma)
-                st.success("등록했어요")
-                st.rerun()
+    def _add_event():
+        t = (st.session_state.get("qa_title") or "").strip()
+        if not t:
+            st.session_state.qa_msg = ("warn", "일정 이름을 적어주세요.")
+            return
+        when = st.session_state.get("qa_when") or "오늘"
+        if when == "내일":
+            ed = day + timedelta(days=1)
+        elif when == "이번 주말":
+            ed = day + timedelta(days=(5 - day.weekday()) % 7)
+        elif when == "직접 고르기":
+            ed = st.session_state.get("qa_date") or day
+        else:
+            ed = day
+        tm = ""
+        if st.session_state.get("qa_ut") and st.session_state.get("qa_time"):
+            tm = st.session_state["qa_time"].strftime("%H:%M")
+        eid = uuid.uuid4().hex[:8]
+        rec = {"title": t, "date": ed.isoformat(), "kind": st.session_state.get("qa_kind") or "가족", "time": tm,
+               "note": (st.session_state.get("qa_note") or "").strip(), "by": me, "rsvp": {me: "yes"}, "done": False}
+
+        def ma(d):
+            d["events"][eid] = rec
+        storage.update(ma)
+        st.session_state.qa_title = ""
+        st.session_state.qa_note = ""
+        st.session_state.qa_msg = ("ok", f"{ed.month}/{ed.day} '{t}' 일정을 추가했어요")
+
+    st.text_input("일정", key="qa_title", max_chars=30, label_visibility="collapsed",
+                  placeholder="예) 가족 저녁식사, 기말고사, 치과")
+    when = st.pills("언제?", ["오늘", "내일", "이번 주말", "직접 고르기"], selection_mode="single", default="오늘", key="qa_when")
+    if when == "직접 고르기":
+        st.date_input("날짜", value=day, format="YYYY/MM/DD", key="qa_date")
+    with st.expander("더 자세히 (시간 · 종류 · 메모) — 안 해도 돼요"):
+        st.selectbox("종류", list(KINDS), format_func=lambda x: f"{KINDS[x][0]} {x}", key="qa_kind")
+        if st.checkbox("시간 정하기", key="qa_ut"):
+            st.time_input("시간", value=datetime.strptime("18:00", "%H:%M").time(), key="qa_time")
+        st.text_input("메모", max_chars=60, key="qa_note")
+    st.button("➕ 추가", type="primary", use_container_width=True, key="qa_add", on_click=_add_event)
+    msg = st.session_state.pop("qa_msg", None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.warning)(msg[1])
 
     up = sorted((ev["date"], ev.get("time") or "", eid, ev) for eid, ev in data["events"].items()
                 if day.isoformat() <= ev["date"] <= (day + timedelta(days=30)).isoformat())
@@ -935,7 +995,27 @@ def tab_calendar(data, me):
             d = date.fromisoformat(dstr)
             diff = (d - day).days
             ico = KINDS.get(ev.get("kind", "기타"), KINDS["기타"])[0]
-            st.markdown(f"- **{'오늘' if diff == 0 else f'D-{diff}'}** · {d.month}/{d.day} {tm} {ico} {esc(ev['title'])}")
+            st.markdown(f"- **{'오늘' if diff == 0 else f'D-{diff}'}** · {d.month}/{d.day} {tm} {ico} {'✅ ' if ev.get('done') else ''}{esc(ev['title'])}")
+
+    missed = [(eid, ev) for eid, ev in data["events"].items()
+              if (day - timedelta(days=7)).isoformat() <= ev["date"] < day.isoformat() and not ev.get("done")]
+    if missed:
+        st.markdown("#### 🫢 지난 일정, 어떻게 됐어요?")
+        st.caption("놓쳐도 괜찮아요. 했으면 완료, 못 했으면 내일로 미룰 수 있어요.")
+        for eid, ev in missed[:5]:
+            st.markdown(f"**{ev['date'][5:]}** {esc(ev['title'])}")
+            ca, cb = st.columns(2)
+            if ca.button("✅ 했어요", key=f"mdone_{eid}", use_container_width=True):
+                def m1(d, eid=eid):
+                    d["events"][eid]["done"] = True
+                    d["events"][eid]["done_by"] = me
+                storage.update(m1)
+                st.rerun()
+            if cb.button("📆 내일로 미루기", key=f"mpost_{eid}", use_container_width=True):
+                def m2(d, eid=eid):
+                    d["events"][eid]["date"] = (day + timedelta(days=1)).isoformat()
+                storage.update(m2)
+                st.rerun()
 
 
 # ───────────────────────── 탭: 이야기책 ─────────────────────────
@@ -1033,6 +1113,8 @@ def tab_family(data, me):
             f"<div class='s'>{CHARS[blood_of(m)][1]} Lv.{level_of(member_days(data, mid))} · {b.month}월 {b.day}일생 · 만 {age_of(b, day)}세</div></div><div class='d'>{dtxt}</div></div>",
             unsafe_allow_html=True)
 
+    balance_card(data, me)
+
     st.markdown("#### 💌 내일의 질문, 내가 정할래요")
     tomorrow = day + timedelta(days=1)
     k = tomorrow.isoformat()
@@ -1105,6 +1187,7 @@ def tab_settings(data, me):
             st.caption("이 주소를 홈 화면에 추가해 두면 앱처럼 열려요.")
     if st.button("다른 사람으로 보기"):
         st.session_state.pop("me", None)
+        st.session_state.page = "home"
         st.query_params.pop("m", None)
         st.rerun()
     with st.expander("프로필 삭제"):
@@ -1113,32 +1196,201 @@ def tab_settings(data, me):
                 d["members"].pop(me, None)
             storage.update(md)
             st.session_state.pop("me", None)
+            st.session_state.page = "home"
             st.query_params.pop("m", None)
             st.rerun()
     st.caption("✅ GitHub 저장소에 안전하게 보관 중" if storage.using_github()
                else "⚠️ GitHub 연결 전: 임시 로컬 저장 중이에요 (README의 Secrets 설정 필요)")
 
 
+# ───────────────────────── 대화 균형 ─────────────────────────
+def balance_card(data, me):
+    cnt = {}
+    for e in data["entries"].values():
+        if day_done(data, e) and e.get("question"):
+            c = e["question"].get("category", "기타")
+            if c not in ("특별 질문", "생일"):
+                cnt[c] = cnt.get(c, 0) + 1
+    bank = sorted({c for c, _ in QUESTIONS})
+    st.markdown("#### ⚖️ 우리 가족 대화 균형")
+    if sum(cnt.values()) < 3:
+        st.caption("함께 답한 날이 3일 이상 쌓이면, 어떤 이야기를 많이/적게 나눴는지 알려드려요.")
+        return
+    mx = max(cnt.values())
+    for c in sorted(set(bank) | set(cnt)):
+        st.progress(cnt.get(c, 0) / mx, text=f"{c} · {cnt.get(c, 0)}회")
+    low = min(bank, key=lambda c: cnt.get(c, 0))
+    st.info(f"우리 가족은 '{low}' 이야기를 가장 적게 나눴어요. 골고루 이야기해 볼까요?")
+    tk = (today() + timedelta(days=1)).isoformat()
+    if st.button(f"내일은 '{low}' 질문으로 받기", use_container_width=True, key="bal_btn"):
+        cur = data["entries"].get(tk, {}).get("question")
+        if cur and cur.get("by") in data["members"]:
+            st.warning("내일 질문이 이미 정해져 있어요.")
+        else:
+            qtxt = random.choice([t for c, t in QUESTIONS if c == low])
+
+            def m(d):
+                d["entries"].setdefault(tk, {})["question"] = {"text": qtxt, "category": low, "by": "bank"}
+            storage.update(m)
+            st.success("내일 질문을 바꿔뒀어요 🎁")
+
+
+# ───────────────────────── 마음 신호 ─────────────────────────
+def unread_count(data, me):
+    return sum(1 for x in data["signals"]
+               if x["from"] != me and x["from"] in data["members"] and x["to"] in ("all", me) and me not in x.get("read", []))
+
+
+def page_signal(data, me):
+    st.markdown("말로 꺼내기 어려운 마음은 **버튼 한 번**으로 전해요. 설명하지 않아도 괜찮아요.")
+    others = [m for m in data["members"] if m != me]
+    if not others:
+        st.info("가족이 한 명 이상 더 등록되면 신호를 보낼 수 있어요. '우리 가족' 메뉴에서 초대 QR을 공유해 보세요.")
+    else:
+        st.markdown("#### 지금 내 마음은?")
+        st.pills("신호", list(SIGNALS), format_func=lambda x: f"{SIGNALS[x][0]} {SIGNALS[x][1]}",
+                 selection_mode="single", key="sig_kind", label_visibility="collapsed")
+        st.selectbox("누구에게?", ["all"] + others, key="sig_to",
+                     format_func=lambda x: "👨‍👩‍👧 가족 모두" if x == "all" else label(data, x, me))
+        st.text_input("한마디 (선택)", max_chars=40, key="sig_note", placeholder="안 써도 돼요")
+
+        def _send():
+            kd = st.session_state.get("sig_kind")
+            if not kd:
+                st.session_state.sig_msg = ("warn", "어떤 마음인지 하나 골라주세요.")
+                return
+            rec = {"id": uuid.uuid4().hex[:8], "from": me, "to": st.session_state.get("sig_to", "all"), "kind": kd,
+                   "note": (st.session_state.get("sig_note") or "").strip(),
+                   "at": datetime.now(KST).isoformat(timespec="seconds"), "read": [me], "replies": {}}
+
+            def m(d):
+                d["signals"].append(rec)
+                d["signals"][:] = d["signals"][-200:]
+            storage.update(m)
+            st.session_state.sig_kind = None
+            st.session_state.sig_note = ""
+            st.session_state.sig_msg = ("ok", "전달했어요 💌 답이 오면 알려드릴게요")
+
+        st.button("💌 보내기", type="primary", use_container_width=True, key="sig_send", on_click=_send)
+        msg = st.session_state.pop("sig_msg", None)
+        if msg:
+            (st.success if msg[0] == "ok" else st.warning)(msg[1])
+
+    inbox = [x for x in reversed(data["signals"])
+             if x["from"] != me and x["from"] in data["members"] and x["to"] in ("all", me)][:15]
+    st.markdown("#### 📬 받은 신호")
+    if not inbox:
+        st.caption("아직 받은 신호가 없어요.")
+    unread = [x["id"] for x in inbox if me not in x.get("read", [])]
+    for x in inbox:
+        ic, nm = SIGNALS.get(x["kind"], ("💌", x["kind"]))
+        new = me not in x.get("read", [])
+        note = f"<div class='txt'>“{esc(x['note'])}”</div>" if x.get("note") else ""
+        st.markdown(f"<div class='sig {'new' if new else ''}'><div class='k'>{'🔴 ' if new else ''}{avatar(data['members'][x['from']])} "
+                    f"{esc(label(data, x['from'], me))} · {ic} {nm}</div>{note}"
+                    f"<div class='s'>{x['at'][5:16].replace('T', ' ')}</div></div>", unsafe_allow_html=True)
+        if me in x.get("replies", {}):
+            st.caption(f"내 답장: {x['replies'][me]}")
+        else:
+            for i in range(0, len(SIG_REPLIES), 3):
+                cols = st.columns(3)
+                for c, r in zip(cols, SIG_REPLIES[i:i + 3]):
+                    if c.button(r, key=f"rp_{x['id']}_{r}", use_container_width=True):
+                        def mr(d, sid=x["id"], r=r):
+                            for y in d["signals"]:
+                                if y["id"] == sid:
+                                    y.setdefault("replies", {})[me] = r
+                        storage.update(mr)
+                        st.rerun()
+    if unread:
+        def mk(d):
+            for y in d["signals"]:
+                if y["id"] in unread and me not in y.setdefault("read", []):
+                    y["read"].append(me)
+        storage.update(mk)
+
+    sent = [x for x in reversed(data["signals"]) if x["from"] == me][:5]
+    if sent:
+        st.markdown("#### 📤 내가 보낸 신호")
+        for x in sent:
+            ic, nm = SIGNALS.get(x["kind"], ("💌", x["kind"]))
+            to = "가족 모두" if x["to"] == "all" else label(data, x["to"], me)
+            reps = "  ".join(f"{label(data, w, me)}: {r}" for w, r in x.get("replies", {}).items() if w in data["members"])
+            st.markdown(f"- {ic} **{nm}** → {to} ({x['at'][5:16].replace('T', ' ')})" + (f"  \n  ↳ {reps}" if reps else "  ↳ 아직 답이 없어요"))
+
+
+# ───────────────────────── 홈 대시보드 ─────────────────────────
+def go(page):
+    st.session_state.page = page
+
+
+def page_home(data, me):
+    day = today()
+    k = day.isoformat()
+    answers = valid_answers(data, data["entries"].get(k, {}))
+    answered = me in answers
+    s, total = stats(data)
+    cur, _, _ = tree_state(total)
+    char_banner(data, me, answered)
+    st.markdown(f"<div class='chips'><span class='chip'>🔥 {s}일 연속</span>"
+                f"<span class='chip'>{cur[1]} {cur[2]}</span><span class='chip'>📖 함께한 {total}일</span></div>",
+                unsafe_allow_html=True)
+    for bid in birthday_people(data, day):
+        st.markdown(f"<div class='bday'>🎂 오늘은 {esc(label(data, bid, me))}의 생일이에요! 🎉</div>", unsafe_allow_html=True)
+
+    q = get_question(data, day)
+    names = [data["members"][x]["name"] for x in answers]
+    ups = sorted((ev["date"], ev.get("time") or "", ev["title"]) for ev in data["events"].values()
+                 if ev["date"] >= k and not ev.get("done"))
+    nxt = f"📅 다음 일정 · {ups[0][0][5:].replace('-', '/')} {esc(ups[0][2])}" if ups else "📅 다가오는 일정이 없어요"
+    st.markdown(f"<div class='card'><div class='who'>오늘 한눈에</div><div class='txt'>💬 {esc(q['text'])}<br>"
+                f"✍️ 답한 가족: {esc(', '.join(names)) if names else '아직 없어요'}<br>{nxt}</div></div>", unsafe_allow_html=True)
+    mood_bar(data, me, k)
+
+    unread = unread_count(data, me)
+    today_ev = sum(1 for ev in data["events"].values() if ev["date"] == k and not ev.get("done"))
+    st.markdown("##### 무엇을 할까요?")
+    with st.container(key="tiles"):
+        for i in range(0, len(TILES), 2):
+            cols = st.columns(2)
+            for c, (pg, ic, nm) in zip(cols, TILES[i:i + 2]):
+                badge, hot = "", False
+                if pg == "today":
+                    badge, hot = (" ✓", False) if answered else (" · 답 대기", True)
+                elif pg == "signal" and unread:
+                    badge, hot = f" 🔴{unread}", True
+                elif pg == "calendar" and today_ev:
+                    badge = f" · 오늘 {today_ev}건"
+                c.button(f"{ic} {nm}{badge}", key=f"tile_{pg}", use_container_width=True, on_click=go, args=(pg,),
+                         type="primary" if hot else "secondary")
+
+
 # ───────────────────────── 메인 ─────────────────────────
+PAGES = {"today": ("💬 오늘의 질문", tab_today), "signal": ("💌 마음 신호", page_signal),
+         "calendar": ("📅 가족 캘린더", tab_calendar), "book": ("📖 이야기책", tab_book),
+         "family": ("🏠 우리 가족", tab_family), "settings": ("⚙️ 내 설정", tab_settings)}
+
+
 def main():
     big = st.session_state.get("big", False)
     inject_css(big)
     data, me = gate()
+    page = st.session_state.get("page", "home")
+    if page not in PAGES:
+        page = "home"
     h1, h2 = st.columns([3, 1])
-    h1.markdown("### 💌 하루 한 질문")
+    if page == "home":
+        h1.markdown("### 💌 하루 한 질문")
+    else:
+        h1.button("← 홈", key="back_home", on_click=go, args=("home",))
     st.session_state.big = h2.toggle("큰 글씨", value=big)
-    st.caption(f"안녕하세요, {avatar(data['members'][me])} {data['members'][me]['name']}")
-    t1, t2, t3, t4, t5 = st.tabs(["오늘", "캘린더", "이야기책", "가족", "설정"])
-    with t1:
-        tab_today(data, me)
-    with t2:
-        tab_calendar(data, me)
-    with t3:
-        tab_book(data, me)
-    with t4:
-        tab_family(data, me)
-    with t5:
-        tab_settings(data, me)
+    if page == "home":
+        st.caption(f"안녕하세요, {avatar(data['members'][me])} {data['members'][me]['name']}")
+        page_home(data, me)
+    else:
+        title, fn = PAGES[page]
+        st.markdown(f"### {title}")
+        fn(data, me)
 
 
 main()
